@@ -431,14 +431,23 @@ def main():
     # Buffett indicator: official annual series + live estimate
     buffett_est, buffett_note = float("nan"), ""
     wb, will, gdp = G("DDDM01USA156NWDB"), G("WILL5000PR"), G("GDP")
-    if len(wb) and len(will) and len(gdp):
+    _bmiss = [n for n, s in (("FRED:DDDM01USA156NWDB (market-cap-to-GDP)", wb),
+                             ("FRED:WILL5000PR (Wilshire 5000)", will),
+                             ("FRED:GDP", gdp)) if not len(s)]
+    if not _bmiss:
         try:
+            # wb is already in percent (2020: ~195%); scale it by the
+            # Wilshire-5000 price move vs the nominal-GDP move since 2020.
+            # (An extra x100 here would print ~27,000% — wb is not a ratio.)
             buffett_est = float(wb.iloc[-1] * (will.iloc[-1] / will["2020"].mean())
-                                / (gdp.iloc[-1] / gdp["2020"].mean()) * 100)
+                                / (gdp.iloc[-1] / gdp["2020"].mean()))
             buffett_note = (f"Live estimate: {wb.iloc[-1]:.0f}% (2020 annual) × Wilshire-5000 move "
                             f"÷ GDP move since 2020 · as of {asof(will)} / {asof(gdp)}")
         except Exception:
             pass
+    if buffett_est != buffett_est:  # NaN: say exactly why, so it stays diagnosable
+        buffett_note = ("n/a — still waiting on: " + ", ".join(_bmiss)) if _bmiss \
+            else "n/a — series are present but the estimate could not be computed"
     dfii10 = G("DFII10")
     excess_cape_yield = float(100 / cape.iloc[-1] - dfii10.iloc[-1]) if len(cape) and len(dfii10) else float("nan")
 
