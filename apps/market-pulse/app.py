@@ -33,6 +33,7 @@ def _stub_series(sid):
     rng = np.random.default_rng(seed)
     specs = {
         "GDP": ("QE", "2000-01-01", "2026-06-30", 10000, 0.012, 0.008),
+        "GDPC1": ("QE", "2000-01-01", "2026-06-30", 23000, 0.006, 0.008),
         "INDPRO": ("ME", "2000-01-01", "2026-08-31", 100, 0.001, 0.010),
         "RSXFS": ("ME", "2000-01-01", "2026-08-31", 400000, 0.003, 0.008),
         "PAYEMS": ("ME", "2000-01-01", "2026-08-31", 140000, 0.001, 0.002),
@@ -63,7 +64,7 @@ def _stub_series(sid):
     rets = rng.normal(drift, vol, len(idx))
     return pd.Series(base * np.exp(np.cumsum(rets)), index=idx)
 
-FRED_IDS = ("GDP", "INDPRO", "RSXFS", "PAYEMS", "UNRATE", "ICSA", "JTSJOL", "AHETPI",
+FRED_IDS = ("GDP", "GDPC1", "INDPRO", "RSXFS", "PAYEMS", "UNRATE", "ICSA", "JTSJOL", "AHETPI",
             "CPIAUCSL", "CPILFESL", "PCEPILFE", "T5YIE", "DFII10",
             "DGS2", "DGS10", "DGS3MO", "BAMLH0A0HYM2", "BAMLC0A0CM",
             "UMCSENT", "CSUSHPISA", "HOUST", "MORTGAGE30US",
@@ -196,13 +197,17 @@ def _fred_one(sid):
 
 
 def _multpl_one(slug, tries=2):
+    # NOTE: multpl retired the P/S by-month table; that URL 301-redirects to
+    # /table/by-year, whose static table carries the live estimate (†) on top
+    # of the yearly history — the regex below captures both row styles.
     url = f"https://www.multpl.com/{slug}/table/by-month"
     for a in range(tries):
         try:
             req = urllib.request.Request(url, headers=UA)
             html = urllib.request.urlopen(req, timeout=25).read().decode("utf-8", "ignore")
             rows = re.findall(
-                r"<td>\s*([A-Z][a-z]{2} \d{1,2}, \d{4})\s*</td>\s*<td[^>]*>\s*&#x2002;\s*([\d.]+)",
+                r"<td>\s*([A-Z][a-z]{2} \d{1,2}, \d{4})\s*</td>\s*<td[^>]*>\s*"
+                r"(?:&#x2002;|<abbr[^>]*>†</abbr>)\s*([\d.]+)",
                 html,
             )
             df = pd.DataFrame(rows, columns=["date", "value"])
@@ -386,6 +391,12 @@ def load_all():
 
 
 # ============================================================ helpers
+def _ord(n):
+    n = int(n)
+    suf = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suf}"
+
+
 def pct_rank(s):
     s = s.dropna()
     return float((s <= s.iloc[-1]).mean() * 100) if len(s) else float("nan")
@@ -396,8 +407,12 @@ def asof(s):
 
 
 def kpi(title, s, fmt="{:.2f}", unit="", years=6, transform=None, note="",
-        higher_is="neutral"):
-    """Metric + history chart card. transform: 'yoy12' | 'yoy4' | None."""
+        higher_is="neutral", hist=" of available history"):
+    """Metric + history chart card. transform: 'yoy12' | 'yoy4' | None.
+
+    hist: describes the percentile window, e.g. the default
+    " of available history", or " of 5-yr window" for Yahoo-seeded series.
+    """
     if s is None or len(s) < 5:
         st.warning(f"{title}: data unavailable")
         return
@@ -418,7 +433,7 @@ def kpi(title, s, fmt="{:.2f}", unit="", years=6, transform=None, note="",
         st.metric(title, f"{fmt.format(cur)}{unit}", f"{chg:+.2f} vs prev",
                   delta_color="normal" if higher_is == "neutral"
                   else ("normal" if (chg > 0) == (higher_is == "good") else "inverse"))
-        st.caption(f"{pr:.0f}th pctile of history · as of {asof(s)}")
+        st.caption(f"{_ord(pr)} pctile{hist} · as of {asof(s)}")
         if note:
             st.caption(note)
     with c2:
@@ -450,7 +465,9 @@ def main():
     unrate = G("UNRATE")
     sahm = (unrate.rolling(3).mean() - unrate.rolling(12).min()).dropna() if len(unrate) else pd.Series(dtype=float)
     core_pce = (G("PCEPILFE").pct_change(12) * 100).dropna()
-    tnx = (px["^TNX"] / 10).dropna() if "^TNX" in px else pd.Series(dtype=float)
+    # NOTE: Yahoo quotes ^TNX directly in percent (5.24 = 5.24% — verified
+    # against known 10y levels in 2020/2022/2024). Do NOT divide by 10.
+    tnx = px["^TNX"].dropna() if "^TNX" in px else pd.Series(dtype=float)
     vx = px["^VIX"].dropna() if "^VIX" in px else pd.Series(dtype=float)
     rsp_spy = (px["RSP"] / px["SPY"]).dropna() if {"RSP", "SPY"} <= set(px.columns) else pd.Series(dtype=float)
 
@@ -520,7 +537,7 @@ def main():
         m1, m2, m3 = st.columns(3)
         with m1:
             st.metric("Shiller CAPE", f"{cape.iloc[-1]:.1f}" if len(cape) else "n/a",
-                      f"{pct_rank(cape):.0f}th pctile of history" if len(cape) else "")
+                      f"{_ord(pct_rank(cape))} pctile of history" if len(cape) else "")
             st.caption(f"As of {asof(cape)} · avg since 1881 ≈ 17 · record 44.2 (Dec 1999)")
         with m2:
             st.metric("Buffett indicator (est.)", f"{buffett_est:.0f}%" if buffett_est == buffett_est else "n/a",
@@ -530,7 +547,7 @@ def main():
             ecy = excess_cape_yield
             st.metric("Excess CAPE yield", f"{ecy:+.1f}%" if ecy == ecy else "n/a",
                       "thin vs history" if ecy == ecy and ecy < 2 else "")
-            st.caption("Earnings yield (1/CAPE) − 10-yr real yield · as of " + asof(dfii10))
+            st.caption(f"Earnings yield (1/CAPE) − 10-yr real yield · as of {asof(cape)} (CAPE) / {asof(dfii10)} (real yield)")
         if len(cape):
             st.line_chart(cape[cape.index >= "1985"])
             st.caption("Shiller CAPE since 1985 — peaks: 1929 (~33), 1999 (44.2), 2021 (~39), now (~41). "
@@ -539,14 +556,16 @@ def main():
         with c1:
             st.markdown("**S&P 500 trailing P/E**")
             if len(pe_trail):
-                st.metric("P/E", f"{pe_trail.iloc[-1]:.1f}×", f"{pct_rank(pe_trail):.0f}th pctile")
+                st.metric("P/E", f"{pe_trail.iloc[-1]:.1f}×", f"{_ord(pct_rank(pe_trail))} pctile")
+                st.caption(f"as of {asof(pe_trail)}")
                 st.line_chart(pe_trail[pe_trail.index >= "2000"])
             else:
                 st.warning("data unavailable")
         with c2:
             st.markdown("**S&P 500 price / sales**")
             if len(ps):
-                st.metric("P/S", f"{ps.iloc[-1]:.2f}×", f"{pct_rank(ps):.0f}th pctile")
+                st.metric("P/S", f"{ps.iloc[-1]:.2f}×", f"{_ord(pct_rank(ps))} pctile")
+                st.caption(f"as of {asof(ps)} · † live estimate (multpl)")
                 st.line_chart(ps[ps.index >= "2000"])
                 st.caption("Hist. norm ~1.5×")
             else:
@@ -554,7 +573,8 @@ def main():
         with c3:
             st.markdown("**S&P 500 dividend yield**")
             if len(divy):
-                st.metric("Div yield", f"{divy.iloc[-1]:.2f}%", f"{pct_rank(divy):.0f}th pctile")
+                st.metric("Div yield", f"{divy.iloc[-1]:.2f}%", f"{_ord(pct_rank(divy))} pctile")
+                st.caption(f"as of {asof(divy)}")
                 st.line_chart(divy[divy.index >= "2000"])
                 st.caption("Low yield = expensive")
             else:
@@ -566,19 +586,19 @@ def main():
 
     with t2:
         st.subheader("Growth")
-        kpi("Real GDP", G("GDP"), fmt="{:.0f}", unit=" $B", transform="yoy4", years=10,
-            note="Quarterly", higher_is="good")
+        kpi("Real GDP", G("GDPC1"), fmt="{:.0f}", unit=" $B", transform="yoy4", years=10,
+            note="Quarterly, inflation-adjusted (FRED GDPC1)", higher_is="good")
         kpi("Industrial production", G("INDPRO"), transform="yoy12", years=6, higher_is="good")
-        kpi("Retail sales", G("RSXFS"), fmt="{:.0f}", unit=" $M", transform="yoy12", years=6,
+        kpi("Retail sales", G("RSXFS"), fmt="{:,.0f}", unit=" $M", transform="yoy12", years=6,
             higher_is="good", note="Advance retail sales")
         st.subheader("Labor")
         kpi("Unemployment rate", unrate, fmt="{:.1f}", unit="%", years=10, higher_is="bad",
             note=f"Sahm: {sahm.iloc[-1]:.2f} (≥0.50 = recession signal)" if len(sahm) else "")
-        kpi("Nonfarm payrolls", G("PAYEMS"), fmt="{:.0f}", unit="k", years=4, higher_is="good",
+        kpi("Nonfarm payrolls", G("PAYEMS"), fmt="{:,.0f}", unit="k", years=4, higher_is="good",
             note="Level (thousands) — watch the slope")
-        kpi("Jobless claims (initial)", G("ICSA"), fmt="{:.0f}", unit="k", years=4,
+        kpi("Jobless claims (initial)", G("ICSA"), fmt="{:,.0f}", unit="k", years=4,
             higher_is="bad", note="Weekly — fastest real-time labor signal")
-        kpi("JOLTS job openings", G("JTSJOL"), fmt="{:.0f}", unit="k", years=6)
+        kpi("JOLTS job openings", G("JTSJOL"), fmt="{:,.0f}", unit="k", years=6)
         kpi("Wage growth (avg hourly earnings)", G("AHETPI"), transform="yoy12", years=6,
             note="Wage-inflation feed-through")
         st.subheader("Inflation")
@@ -599,7 +619,7 @@ def main():
         st.subheader("Consumer & housing")
         kpi("Michigan sentiment", G("UMCSENT"), fmt="{:.1f}", years=10, higher_is="good")
         kpi("Case-Shiller home prices", G("CSUSHPISA"), transform="yoy12", years=10)
-        kpi("Housing starts", G("HOUST"), fmt="{:.0f}", unit="k", years=10, higher_is="good")
+        kpi("Housing starts", G("HOUST"), fmt="{:,.0f}", unit="k", years=10, higher_is="good")
         kpi("30-yr mortgage rate", G("MORTGAGE30US"), fmt="{:.2f}", unit="%", years=10,
             higher_is="bad")
 
@@ -612,18 +632,22 @@ def main():
                 if len(sp):
                     st.metric("S&P 500", f"{sp.iloc[-1]:,.0f}",
                               f"{(sp.iloc[-1] / sp.iloc[-21] - 1) * 100:+.1f}% 1-mo" if len(sp) > 21 else "")
+                    st.caption(f"as of {asof(sp)}")
                     st.line_chart(sp[sp.index >= sp.index.max() - pd.DateOffset(years=1)])
             with c2:
                 if len(vx):
                     st.metric("VIX", f"{vx.iloc[-1]:.1f}", "fear" if vx.iloc[-1] > 25 else "calm")
+                    st.caption(f"as of {asof(vx)} · 5-yr window")
                     st.line_chart(vx[vx.index >= vx.index.max() - pd.DateOffset(years=1)])
-        kpi("10-yr yield (market)", tnx, fmt="{:.2f}", unit="%", years=2)
+        kpi("10-yr yield (market)", tnx, fmt="{:.2f}", unit="%", years=2,
+            hist=" of 5-yr window")
         if len(rsp_spy):
             st.markdown("**Breadth: equal-weight ÷ cap-weight (RSP/SPY)**")
             c1, c2 = st.columns([1, 2.4])
             with c1:
-                st.metric("RSP/SPY", f"{rsp_spy.iloc[-1]:.3f}", f"{pct_rank(rsp_spy):.0f}th pctile")
-                st.caption("Low = narrow mega-cap leadership")
+                st.metric("RSP/SPY", f"{rsp_spy.iloc[-1]:.3f}", f"{_ord(pct_rank(rsp_spy))} pctile")
+                st.caption(f"as of {asof(rsp_spy)} · 5-yr window")
+                st.caption("Ratio level is arbitrary (ETF prices differ) — trend & percentile matter. Low = narrow mega-cap leadership")
             with c2:
                 st.line_chart(rsp_spy)
         st.subheader("Credit — the fear gauge that matters")
@@ -651,7 +675,8 @@ def main():
 
     with st.expander("Methodology & limitations"):
         st.markdown(
-            "- **Valuation**: CAPE / P/E / P/S / div yield from multpl.com (monthly). "
+            "- **Valuation**: CAPE / P/E / div yield from multpl.com (monthly); "
+            "P/S from multpl.com (annual history + live estimate). "
             "Buffett indicator: official FRED/WDI annual series (lags several years) + a live estimate "
             "scaling the last annual ratio by Wilshire-5000 and nominal GDP moves since — an approximation, labeled as such.\n"
             "- **Economy**: FRED series as published (subject to revision). YoY transforms labeled. FRED loads via the official API when a free FRED_API_KEY is set (recommended), else direct CSV, with the DBnomics FRED mirror as automatic fallback.\n"

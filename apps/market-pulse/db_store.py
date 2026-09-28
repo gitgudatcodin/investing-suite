@@ -15,17 +15,46 @@ DB_PATH = os.path.join(DB_DIR, "market_pulse.db")
 
 # Update frequency per FRED series id.
 FREQ = {
-    "GDP": "quarterly",
+    "GDP": "quarterly", "GDPC1": "quarterly",
     "INDPRO": "monthly", "RSXFS": "monthly", "PAYEMS": "monthly",
     "UNRATE": "monthly", "JTSJOL": "monthly", "AHETPI": "monthly",
     "CPIAUCSL": "monthly", "CPILFESL": "monthly", "PCEPILFE": "monthly",
-    "UMCSENT": "monthly", "HOUST": "monthly", "MORTGAGE30US": "monthly",
+    "UMCSENT": "monthly", "HOUST": "monthly", "MORTGAGE30US": "weekly",
     "ICSA": "weekly",
     "T5YIE": "daily", "DFII10": "daily", "DGS2": "daily", "DGS10": "daily",
     "DGS3MO": "daily", "BAMLH0A0HYM2": "daily", "BAMLC0A0CM": "daily",
     "WILL5000PR": "daily",
-    "CSUSHPISA": "annual", "DDDM01USA156NWDB": "annual",
+    "CSUSHPISA": "monthly", "DDDM01USA156NWDB": "annual",
 }
+
+# Bump when fetch/parse logic changes: a "checked recently, nothing new"
+# backoff recorded by older code must not suppress the new logic's fetch.
+# (v1 briefly wrote backoffs even for failed fetches; v2 fixes that, so any
+# v1 backoff is suspect and gets one clean re-check.)
+FETCH_VERSION = 2
+
+_SCHEMA_STMTS = [
+    """CREATE TABLE IF NOT EXISTS series (
+        sid TEXT NOT NULL,
+        d   TEXT NOT NULL,
+        v   REAL NOT NULL,
+        PRIMARY KEY (sid, d))""",
+    """CREATE TABLE IF NOT EXISTS meta (
+        sid        TEXT PRIMARY KEY,
+        freq       TEXT NOT NULL,
+        last_fetch TEXT,
+        fetch_v    INTEGER)""",
+]
+
+
+def _migrate(con):
+    """Add the fetch_v column to pre-existing meta tables (no-op if present)."""
+    try:
+        con.execute("ALTER TABLE meta ADD COLUMN fetch_v INTEGER")
+        con.commit()
+    except Exception:
+        pass
+
 
 # Don't re-check a series more often than this after a fetch that found
 # nothing new (some releases lag the calendar).
@@ -86,6 +115,7 @@ def _open_turso(url: str, token: str):
         for stmt in _SCHEMA_STMTS:
             con.execute(stmt)
         con.commit()
+        _migrate(con)
         return con
     except Exception as e:
         print(f"[db_store] Turso connect failed ({e}); using local SQLite")
@@ -109,6 +139,7 @@ def open_db(path: str = DB_PATH):
         con.execute("PRAGMA journal_mode=WAL")
         for stmt in _SCHEMA_STMTS:
             con.execute(stmt)
+        _migrate(con)
         return con
     except Exception:
         return None
@@ -144,7 +175,9 @@ def is_fresh(con, sid: str, freq: str, now: dt.datetime | None = None) -> bool:
         if dt.date.fromisoformat(row[0]) >= _expected_min(freq, now.date()):
             return True
         m = con.execute(
-            "SELECT last_fetch FROM meta WHERE sid=?", (sid,)).fetchone()
+            "SELECT last_fetch, fetch_v FROM meta WHERE sid=?", (sid,)).fetchone()
+        if m and m[0] and (m[1] or 0) < FETCH_VERSION:
+            return False  # backoff was recorded by older fetch logic: re-check
         if m and m[0] and now - dt.datetime.fromisoformat(m[0]) < MIN_INTERVAL[freq]:
             return True
         return False
@@ -175,11 +208,16 @@ def get_series(con, sid: str):
 
 
 def upsert_series(con, sid: str, freq: str, series, now: dt.datetime | None = None) -> int:
-    """Insert/replace rows; always refresh last_fetch. Returns rows written.
+    """Insert/replace rows; on a non-empty fetch also refresh last_fetch.
 
     Uses chunked multi-row INSERTs (one round trip per chunk) instead of
     executemany: the libsql remote client issues roughly one HTTP request
     per statement, so a 16k-row backfill via executemany would take forever.
+
+    The meta row (which drives the "checked recently" backoff in is_fresh)
+    is only written when the fetch returned rows. A failed/empty fetch must
+    NOT start a backoff — otherwise one bad fetch (e.g. a changed page
+    format) would suppress retries for days.
     """
     now = now or dt.datetime.now(dt.timezone.utc)
     n = 0
@@ -199,12 +237,12 @@ def upsert_series(con, sid: str, freq: str, series, now: dt.datetime | None = No
                     "INSERT OR REPLACE INTO series (sid, d, v)"
                     f" VALUES {placeholders}",
                     params)
-        con.execute(
-            "INSERT INTO meta (sid, freq, last_fetch) VALUES (?, ?, ?)"
-            " ON CONFLICT(sid) DO UPDATE SET freq=excluded.freq,"
-            " last_fetch=excluded.last_fetch",
-            (sid, freq, now.isoformat()))
-        con.commit()
+            con.execute(
+                "INSERT INTO meta (sid, freq, last_fetch, fetch_v) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(sid) DO UPDATE SET freq=excluded.freq,"
+                " last_fetch=excluded.last_fetch, fetch_v=excluded.fetch_v",
+                (sid, freq, now.isoformat(), FETCH_VERSION))
+            con.commit()
     except Exception:
         try:
             con.rollback()
