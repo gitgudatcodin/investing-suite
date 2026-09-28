@@ -33,6 +33,10 @@ tools = [
     ("pages/05_Quant_Lab.py", "🧪 Quant Lab",
      "Five strategy workbenches — pairs trading, ML signals, RL agent, sentiment signals, "
      "sentiment strategy — each backtested point-in-time with costs, benchmarked vs SPY."),
+    ("pages/11_Valuation_Lab.py", "🔬 Valuation Lab",
+     "Scenario-based equity valuation: bull/base/bear projections from your assumptions "
+     "(growth, margins, buybacks, exit P/E), discounted to present value, reverse-DCF reality "
+     "check, and a probability-weighted fair value — auto-filled from Yahoo, no keys."),
 ]
 
 for path, label, desc in tools:

@@ -1,6 +1,6 @@
 # Investing Suite
 
-One Streamlit app combining all five stock/investment research tools.
+One Streamlit app combining all six stock/investment research tools.
 No API keys needed anywhere.
 
 ## Run
@@ -19,13 +19,14 @@ streamlit run app.py
 | 💼 Portfolio Analytics | Diagnostics | CAGR, Sharpe/Sortino, drawdowns, VaR/CVaR, beta/alpha, rolling risk, correlations |
 | 🎯 Kelly Sizer | Position sizing | Kelly-criterion sizing: growth-optimal (multivariate) + conviction-weighted diversified modes |
 | 🧪 Quant Lab | 5 workbenches | Pairs trading, ML signals, RL agent, sentiment signals, sentiment strategy — honest backtests vs SPY |
+| 🔬 Valuation Lab | Scenario valuator | Bull/base/bear multi-year projections (growth, margins, buybacks, exit P/E), present values, reverse-DCF check, probability-weighted fair value |
 
 ## Structure
 
 - `app.py` — suite home page with navigation cards
 - `pages/` — thin launchers, one per tool (each original app runs unmodified)
 - `apps/` — the original apps: `market-pulse`, `kelly-sizer`, `portfolio-app`,
-  `stock-screeners` (with its JSON datasets), `quant-lab` (engine + pages)
+  `stock-screeners` (with its JSON datasets), `quant-lab` (engine + pages), `valuation-lab`
 
 ## Notes
 
