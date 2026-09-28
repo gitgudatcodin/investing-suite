@@ -1,7 +1,8 @@
 """Market Pulse — real-time trader/investor dashboard.
 
 Live data: FRED (economy & rates), multpl.com (valuation ratios),
-Yahoo Finance (market prices). No API keys. Cached 6h (FRED/multpl), 1h (prices).
+Yahoo Finance (market prices). No API keys required (optional free FRED key
+for bulletproof economic data). Cached 6h (FRED/multpl), 1h (prices).
 
 Run:  pip install -r requirements.txt && streamlit run app.py
 """
@@ -11,6 +12,7 @@ import os
 import time
 import hashlib
 import urllib.request
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -103,11 +105,52 @@ def _dbnomics_fred(sid, timeout=25):
         return pd.Series(dtype=float)
 
 
+def _fred_api_key():
+    """Free FRED API key from env or Streamlit secrets (optional)."""
+    k = os.environ.get("FRED_API_KEY")
+    if not k:
+        try:
+            k = st.secrets.get("FRED_API_KEY")
+        except Exception:
+            k = None
+    return k
+
+
+def _fred_api(sid, key, timeout=25):
+    """FRED official API (api.stlouisfed.org) — reliable even where the FRED
+    website/CSV endpoint throttles cloud IPs. Free key, no card."""
+    import json as _json
+    url = ("https://api.stlouisfed.org/fred/series/observations?series_id="
+           + urllib.parse.quote(sid) + "&api_key=" + urllib.parse.quote(key)
+           + "&file_type=json")
+    try:
+        req = urllib.request.Request(url, headers=UA)
+        payload = _json.loads(
+            urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8"))
+        obs = payload.get("observations", [])
+        rows = [(o.get("date"), o.get("value")) for o in obs
+                if o.get("value") not in (None, "", ".")]
+        if not rows:
+            return pd.Series(dtype=float)
+        idx = pd.to_datetime([r[0] for r in rows])
+        vals = pd.to_numeric([r[1] for r in rows], errors="coerce")
+        s = pd.Series(vals, index=idx).dropna().sort_index()
+        return s[~s.index.duplicated(keep="last")]
+    except Exception:
+        return pd.Series(dtype=float)
+
+
 def _fred_one(sid):
     if _STUB_MODE == "fail":
         return pd.Series(dtype=float)
     if _STUB_MODE:
         return _stub_series(sid)
+    # 0) FRED official API when a free key is configured — the reliable path.
+    key = _fred_api_key()
+    if key:
+        s = _fred_api(sid, key)
+        if len(s):
+            return s
     # 1) FRED direct CSV — single fast attempt so a blocked FRED fails over
     #    quickly instead of burning 2 x 25s timeouts per series.
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
@@ -522,7 +565,7 @@ def main():
             "- **Valuation**: CAPE / P/E / P/S / div yield from multpl.com (monthly). "
             "Buffett indicator: official FRED/WDI annual series (lags several years) + a live estimate "
             "scaling the last annual ratio by Wilshire-5000 and nominal GDP moves since — an approximation, labeled as such.\n"
-            "- **Economy**: FRED series as published (subject to revision). YoY transforms labeled. FRED loads directly, with the DBnomics FRED mirror as automatic fallback.\n"
+            "- **Economy**: FRED series as published (subject to revision). YoY transforms labeled. FRED loads via the official API when a free FRED_API_KEY is set (recommended), else direct CSV, with the DBnomics FRED mirror as automatic fallback.\n"
             "- **Markets**: Yahoo Finance adjusted closes; weekend/holiday gaps forward-filled.\n"
             "- Percentiles rank the current value against each series' full history.\n"
             "- Valuation gauges predict long-horizon returns, not timing. Regime pills are "

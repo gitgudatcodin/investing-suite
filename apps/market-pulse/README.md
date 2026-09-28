@@ -1,7 +1,9 @@
 # Market Pulse — trader dashboard
 
 Real-time economic indicators and market-valuation gauges for traders and
-investors. No API keys — data from FRED, multpl.com, and Yahoo Finance.
+investors. No API keys required — data from FRED, multpl.com, and Yahoo
+Finance. (An optional free FRED key makes economic data bulletproof;
+see below.)
 
 ## Run
 
@@ -32,10 +34,30 @@ streamlit run app.py
   refetched when its release calendar says new data can exist (daily series
   after the last weekday, monthly after the prior month, etc.). A normal
   launch does zero network requests and renders instantly.
-- FRED's public CSV endpoint throttles aggressively, so every FRED series
-  fails over fast (6s) to the DBnomics FRED mirror (no key). The DB ships
-  pre-seeded with multpl + Yahoo history; FRED series fill on first run.
-  `python seed_db.py` re-seeds from scratch.
+- FRED's public CSV endpoint throttles aggressively (many cloud IPs are
+  blocked outright), so every FRED series fails over fast (6s) to the
+  DBnomics FRED mirror (no key). The DB ships pre-seeded with multpl +
+  Yahoo history; FRED series fill on first run. `python seed_db.py`
+  re-seeds from scratch.
+
+## Free FRED API key — recommended (2 minutes, no credit card)
+
+This is the reliable path for economic data: FRED's website throttles cloud
+hosts, and third-party mirrors can break. The official API works everywhere.
+
+1. Sign up at https://fred.stlouisfed.org/docs/api/api_key.html
+   (free account, instant key, no credit card).
+2. Add it next to your Turso secrets in Streamlit Cloud → Settings →
+   Secrets (or as an env var locally):
+
+```toml
+FRED_API_KEY = "..."
+```
+
+That's it — the app tries the official API first, then the CSV endpoint,
+then DBnomics. With the key set, the whole Economy tab and all FRED-backed
+cards (Buffett indicator, excess CAPE yield, credit spreads) backfill
+automatically on the next run.
 
 ## Shared cloud database (Turso) — recommended for Streamlit Cloud
 
