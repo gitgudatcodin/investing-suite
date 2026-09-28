@@ -253,6 +253,11 @@ with tab_backtest:
     st.subheader(f"Backtest — {strategy}")
     st.write("Point-in-time monthly backtest on bundled history (2017→2026): month-end prices, "
              "fundamentals as actually filed by each rebalance date. Equal weight, long only, no costs.")
+    st.caption("Method notes: Sharpe uses a 0% risk-free rate. Months with no eligible holdings are "
+               "scored as cash (0%). Annual strategies form each June and start earning the next month. "
+               "Fundamental history is built from SEC EDGAR by an automated pipeline; known assembler "
+               "artifacts and impossible values were nulled (see data_fund_v2_repair_manifest.json), "
+               "but the history has not been name-by-name verified — treat results as research, not a buy list.")
     try:
         import backtest as bt
         has_data = os.path.exists(os.path.join(APP_DIR, "data_price.json")) and \
