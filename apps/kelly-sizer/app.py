@@ -11,7 +11,7 @@ st.set_page_config(page_title="Kelly Position Sizer", page_icon="🎯", layout="
 
 st.title("🎯 Kelly Position Sizer")
 st.markdown(
-    "Size stock positions with the **Kelly criterion** — `f* = p − (1−p) / b` — "
+    "Size stock positions with the **Kelly criterion** — `f* = p/D − (1−p)/U` — "
     "bet in proportion to your edge. Edit the table, tune the assumptions, "
     "and get a growth-optimal portfolio."
 )
@@ -97,8 +97,14 @@ beta = df["Beta"].to_numpy(dtype=float)
 
 # ---------------------------------------------------------------- Kelly math
 upside = target / price - 1.0
-odds = upside / np.maximum(down, 1e-6)
-k_disc = p - (1.0 - p) / np.maximum(odds, 1e-9)   # discrete Kelly per bet
+odds = upside / np.maximum(down, 1e-6)          # reward/risk ratio (descriptive)
+# Discrete Kelly for a bet that wins `upside` / loses `down` per unit staked:
+# max E[log(1+f*U)] = p*log(1+f*U) + q*log(1-f*D)  ->  f* = p/D - q/U.
+# (Textbook f* = p - q/b is the special case D = 1, i.e. losing the full stake.)
+k_disc = np.where(upside > 0,
+                  p / np.maximum(down, 1e-9) - (1.0 - p) / np.maximum(upside, 1e-9),
+                  np.nan)
+k_disc_pos = np.nan_to_num(k_disc, nan=0.0)      # NaN (upside<=0) -> zero conviction
 mu = p * upside - (1.0 - p) * down                 # expected 12-mo return
 
 Sigma = sig_m ** 2 * np.outer(beta, beta) + np.diag(np.full(n, sig_e ** 2)) + np.eye(n) * 1e-8
@@ -162,27 +168,35 @@ mode = st.radio(
 )
 
 def finalize(w):
-    """Cap -> normalize to invested -> dust filter -> renormalize."""
+    """Cap -> normalize to invested -> dust filter, iterated to a fixed point.
+
+    A hard cap is applied last: if caps + dust make full investment impossible,
+    the remainder stays in cash rather than violating the cap.
+    """
     w = np.array(w, dtype=float).copy()
     cap = max_pos / 100.0
-    for _ in range(30):  # iterative water-fill for the max-position cap
-        over = w > cap
-        if not over.any():
-            break
-        excess = float((w[over] - cap).sum())
-        w[over] = cap
-        under = ~over & (w > 0)
-        if under.any() and w[under].sum() > 0:
-            w[under] += excess * w[under] / w[under].sum()
     invested = 1.0 - cash_pct / 100.0
-    tot = w.sum()
-    w = w / tot * invested if tot > 0 else w
-    w[w < dust / 100.0] = 0.0
-    tot = w.sum()
-    return w / tot * invested if tot > 0 else w
+    dust_w = dust / 100.0
+    for _ in range(30):
+        for _ in range(30):  # water-fill: cap the oversized, spread excess
+            over = w > cap
+            if not over.any():
+                break
+            excess = float((w[over] - cap).sum())
+            w[over] = cap
+            under = ~over & (w > 0)
+            if under.any() and w[under].sum() > 0:
+                w[under] += excess * w[under] / w[under].sum()
+        tot = w.sum()
+        w = w / tot * invested if tot > 0 else w
+        dropped = (w > 0) & (w < dust_w)
+        w[dropped] = 0.0
+        if not dropped.any():
+            break
+    return np.minimum(w, cap)
 
 w_growth = finalize(w_frac)                                # multivariate, fraction applied
-w_conv = finalize(kelly_frac * np.maximum(k_disc, 0.0))    # discrete conviction scores
+w_conv = finalize(kelly_frac * np.maximum(k_disc_pos, 0.0))  # discrete conviction scores
 
 if mode.startswith("🎯"):
     w_final = w_growth
@@ -191,7 +205,7 @@ if mode.startswith("🎯"):
                "highest edge-per-unit-risk bets — diversifiers earn zero weight by design.")
 else:
     w_final = w_conv
-    lev = float(np.maximum(k_disc, 0.0).sum())
+    lev = float(np.maximum(k_disc_pos, 0.0).sum())
     st.caption("Per-stock fractional Kelly as conviction scores, then your caps, dust filter, "
                "and cash reserve. Diversified by design — matches the guardrailed portfolio.")
 
@@ -240,12 +254,13 @@ with st.expander("How this works — the math, plainly"):
     st.markdown(
         """
 **The formula.** For a bet with win probability *p*, loss probability *q = 1−p*,
-and net odds *b* (profit per $1 staked): **f\\* = p − q/b**. Bet in proportion
-to your edge; it maximizes long-run compound growth.
+that pays *U* (upside) per $1 staked when right and loses *D* (downside) per $1
+staked when wrong: **f\* = p/D − q/U**. It maximizes long-run compound growth.
+(The textbook f\* = p − q/b is the special case D = 1 — losing the full stake.)
 
 **From bets to stocks.** Each stock is treated as a binary-ish bet:
 - *Upside* = Target ÷ Price − 1, *Downside* = your loss estimate if wrong
-- *Odds b* = Upside ÷ Downside
+- *Odds* = Upside ÷ Downside (reward/risk; f\* > 0 exactly when expected return > 0)
 - *Expected return μ* = p·Upside − (1−p)·Downside
 
 **From stocks to a portfolio.** For correlated bets, Kelly generalizes to the
