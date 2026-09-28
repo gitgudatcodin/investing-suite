@@ -173,8 +173,9 @@ def portfolio_metrics(pr, br, rf_annual):
     total = eq[-1] / eq[0] - 1
     cagr = (1 + total) ** (ANN / n) - 1
     sharpe = (m - rf_d) / pr.std(ddof=1) * np.sqrt(ANN) if vol > 1e-12 else np.nan
-    dn = pr[pr < 0]
-    down_dev = np.sqrt(np.mean(dn ** 2)) * np.sqrt(ANN) if len(dn) > 1 else 0.0
+    # P5: standard downside deviation = RMS of min(0, r) over ALL observations
+    # (zeros for positive days), not just over the negative subset.
+    down_dev = np.sqrt(np.mean(np.minimum(0, pr) ** 2)) * np.sqrt(ANN)
     sortino = (cagr - rf_annual) / down_dev if down_dev > 0 else np.nan
     dd, pk, tr = max_drawdown(eq)
     calmar = cagr / dd if dd > 0 else np.nan
@@ -190,7 +191,9 @@ def portfolio_metrics(pr, br, rf_annual):
         br = _clean(br)
         bv = np.cov(br, ddof=1)
         beta = np.cov(pr, br, ddof=1)[0, 1] / bv if bv > 0 else np.nan
-        alpha = (m - beta * br.mean()) * ANN
+        # P2: Jensen's alpha = annualized excess return over the CAPM-implied
+        # excess return; the risk-free rate must be subtracted from BOTH legs.
+        alpha = ((m - rf_d) - beta * (br.mean() - rf_d)) * ANN
         corr = np.corrcoef(pr, br)[0, 1]
         ex = pr - br
         te = ex.std(ddof=1) * np.sqrt(ANN)
@@ -257,12 +260,12 @@ def growth_chart(dates, port_eq, bench_eq=None, bench_name=""):
     fig.update_yaxes(tickprefix="$", tickformat=",.0f")
     return _layout(fig, "Growth of $10,000", "Value ($)")
 
-def donut_chart(labels, weights):
+def donut_chart(labels, weights, title="Allocation"):
     fig = go.Figure(go.Pie(labels=labels, values=weights, hole=0.55,
                            marker=dict(colors=PALETTE),
                            textinfo="label+percent", textfont=dict(size=11)))
     fig.update_layout(paper_bgcolor="#121826", font=dict(color="#e8ecf4", size=11),
-                      title=dict(text="Allocation", font=dict(size=15, color="#e8ecf4")),
+                      title=dict(text=title, font=dict(size=15, color="#e8ecf4")),
                       margin=dict(l=10, r=10, t=44, b=10), showlegend=False)
     return fig
 
@@ -439,20 +442,25 @@ def run_analysis(df, years, bench, rf, sizing_mode, mode):
     dates = sub.index.strftime("%Y-%m-%d").tolist()
     rets = sub.pct_change().iloc[1:].values
     ret_dates = dates[1:]
-    latest = sub.iloc[-1].values
+    # P1: in buy-and-hold (drift) mode share counts imply starting allocation,
+    # so value them at start-of-window prices; rebalanced mode targets the
+    # current (latest-price) allocation.
+    base = sub.iloc[0].values if sizing_mode == "drift" else sub.iloc[-1].values
     n_h = len(ok_hold)
     if mode == "Weights %":
         tot = sum(a for _, a in ok_hold) or 1
         weights = np.array([a / tot for _, a in ok_hold])
     else:
-        vals = np.array([a * latest[i] for i, (_, a) in enumerate(ok_hold)])
+        vals = np.array([a * base[i] for i, (_, a) in enumerate(ok_hold)])
         weights = vals / (vals.sum() or 1)
     port_rets = portfolio_returns(rets[:, :n_h], weights, sizing_mode)
     bench_rets = rets[:, n_h] if (bench and bench in closes.columns) else None
     M = portfolio_metrics(port_rets, bench_rets, rf)
     H = holdings_metrics(rets[:, :n_h], weights, port_rets, rf)
     monthly = monthly_returns(ret_dates, port_rets)
-    bench_eq = (10000 * np.cumprod(1 + bench_rets)) if bench_rets is not None else None
+    # P4: include the initial $10,000 point so bench_eq aligns with dates (n+1)
+    bench_eq = (np.insert(10000 * np.cumprod(1 + bench_rets), 0, 10000)
+                if bench_rets is not None else None)
     # full benchmark metric set, so every displayed number has a benchmark twin
     BM = portfolio_metrics(bench_rets, None, rf) if bench_rets is not None else None
     bench_monthly = monthly_returns(ret_dates, bench_rets) if bench_rets is not None else None
@@ -513,14 +521,18 @@ with tab_ov:
     with c[1]: kpi_card("Alpha", pct(M.get("alpha")), f"annualized, vs {res['bench'] if has_b else '—'}", cls(M.get("alpha")))
     with c[2]: kpi_card("VaR 95%", pct(M["var95"]), "daily · " + bmk("var95"), "neg")
     with c[3]: kpi_card("Correlation", num2(M.get("corr")), f"vs {res['bench']}" if has_b else "no benchmark")
-    st.plotly_chart(growth_chart(rdates, M["equity"][1:],
+    # P4: plot the full equity curve including the initial $10,000 point
+    st.plotly_chart(growth_chart(dates, M["equity"],
                                  res["bench_eq"], res["bench"] if has_b else ""),
                     width="stretch")
     c1, c2 = st.columns(2)
     with c1:
-        st.plotly_chart(donut_chart(tickers, w), width="stretch")
+        # P1: in drift mode the donut shows the STARTING allocation (weights drift after)
+        _atitle = ("Starting allocation" if res["sizing_mode"] == "drift"
+                   else "Allocation (target)")
+        st.plotly_chart(donut_chart(tickers, w, _atitle), width="stretch")
     with c2:
-        st.plotly_chart(underwater_chart(rdates, M["equity"][1:]), width="stretch")
+        st.plotly_chart(underwater_chart(dates, M["equity"]), width="stretch")
 
 with tab_pf:
     st.plotly_chart(heatmap_fig(res["monthly"]), width="stretch")
@@ -564,7 +576,7 @@ with tab_rk:
     bench_tail = (f" · **Bench maxDD:** {pct(BM['max_dd'])}"
                   f" · **Bench best day:** {pct(BM['best_day'])}"
                   f" · **Bench worst day:** {pct(BM['worst_day'])}") if has_b else ""
-    st.markdown(f"**Max drawdown:** {pct(M['max_dd'])} from {rdates[M['dd_peak']]} to {rdates[M['dd_trough']]} · "
+    st.markdown(f"**Max drawdown:** {pct(M['max_dd'])} from {dates[M['dd_peak']]} to {dates[M['dd_trough']]} · "
                 f"**Best day:** {pct(M['best_day'])} · **Worst day:** {pct(M['worst_day'])}" + bench_tail)
     if has_b:
         st.subheader("Benchmark-relative")
@@ -605,12 +617,22 @@ with tab_hd:
         rows["Total return"].append(pct(BM["total_ret"]))
         rows["Volatility"].append(pct(BM["vol"]))
         rows["Sharpe"].append(num2(BM["sharpe"]))
-        rows["Beta (vs portf.)"].append("1.00")
+        # P3: benchmark's beta vs the PORTFOLIO = cov(bench, port)/var(port);
+        # 1.00 would be its beta vs itself, which this column does not show.
+        _pv = np.var(res["port_rets"], ddof=1)
+        _bvp = (np.cov(res["bench_rets"], res["port_rets"], ddof=1)[0, 1] / _pv
+                if _pv > 0 else np.nan)
+        rows["Beta (vs portf.)"].append(num2(_bvp))
         rows["Return contrib."].append("—")
         rows["Risk contrib."].append("—")
     dfh = pd.DataFrame(rows)
     st.dataframe(dfh, width="stretch", hide_index=True)
-    st.caption("Return contrib. ≈ weight × holding CAGR. Risk contrib. = Euler share of portfolio volatility (sums to 100%).")
+    # P6: risk contributions are computed on a fixed-weight basis; in buy-and-hold
+    # (drift) mode the actual weights drift, so label that explicitly.
+    _rc_basis = ("fixed-weight basis (actual weights drift in buy & hold mode)"
+                 if res["sizing_mode"] == "drift" else "fixed target weights")
+    st.caption("Return contrib. ≈ weight × holding CAGR. Risk contrib. = Euler share of portfolio "
+               f"volatility on a {_rc_basis} (sums to 100%).")
 
 with st.expander("Methodology & data notes"):
     st.markdown("""
@@ -618,7 +640,8 @@ with st.expander("Methodology & data notes"):
   baked into closes, so returns are **total returns**. Series are inner-joined on common trading days.
 - **CAGR** = (end/start)^(252/n) − 1. **Volatility** = daily σ × √252. **Sharpe** uses the risk-free rate above.
 - **Sortino** = (CAGR − rf) / downside deviation, where downside deviation is the
-  annualized root-mean-square of negative daily returns.
+  annualized root-mean-square of min(0, daily return) over all trading days
+  (positive days contribute zero, not excluded).
 - **VaR/CVaR 95%** are historical (empirical quantile / tail mean of daily returns).
 - **Beta** = cov(port, bench)/var(bench); **alpha** annualized; **R²** = corr²; **tracking error** = σ(port−bench) × √252;
   **information ratio** = mean(port−bench) × 252 / TE; **Treynor** = (CAGR − rf)/beta.
