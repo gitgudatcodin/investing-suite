@@ -103,49 +103,33 @@ def _dbnomics_fred(sid, timeout=25):
         return pd.Series(dtype=float)
 
 
-def _fred_one(sid, tries=2):
+def _fred_one(sid):
     if _STUB_MODE == "fail":
         return pd.Series(dtype=float)
     if _STUB_MODE:
         return _stub_series(sid)
-    # 1) FRED direct CSV
+    # 1) FRED direct CSV — single fast attempt so a blocked FRED fails over
+    #    quickly instead of burning 2 x 25s timeouts per series.
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
-    for a in range(tries):
-        try:
-            req = urllib.request.Request(url, headers=UA)
-            df = pd.read_csv(urllib.request.urlopen(req, timeout=25))
-            df.columns = [c.strip().upper() for c in df.columns]
-            df["DATE"] = pd.to_datetime(df["DATE"])
-            df["VALUE"] = pd.to_numeric(df["VALUE"], errors="coerce")
-            s = df.dropna(subset=["VALUE"]).set_index("DATE")["VALUE"].sort_index()
-            if len(s):
-                return s
-        except Exception:
-            time.sleep(3 * (a + 1))
+    try:
+        req = urllib.request.Request(url, headers=UA)
+        df = pd.read_csv(urllib.request.urlopen(req, timeout=6))
+        df.columns = [c.strip().upper() for c in df.columns]
+        df["DATE"] = pd.to_datetime(df["DATE"])
+        df["VALUE"] = pd.to_numeric(df["VALUE"], errors="coerce")
+        s = df.dropna(subset=["VALUE"]).set_index("DATE")["VALUE"].sort_index()
+        if len(s):
+            return s
+    except Exception:
+        pass
     # 2) DBnomics FRED mirror (independent host, no key)
     return _dbnomics_fred(sid)
-
-
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
-def fred_many(sids):
-    """Polite parallel fetch: 2 workers, 1s stagger, 2 tries."""
-    out = {}
-
-    def one(sid):
-        time.sleep(1.0)
-        return sid, _fred_one(sid)
-
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        for sid, s in ex.map(one, list(sids)):
-            out[sid] = s
-    return out
 
 
 def _multpl_one(slug, tries=2):
     url = f"https://www.multpl.com/{slug}/table/by-month"
     for a in range(tries):
         try:
-            time.sleep(1.5)
             req = urllib.request.Request(url, headers=UA)
             html = urllib.request.urlopen(req, timeout=25).read().decode("utf-8", "ignore")
             rows = re.findall(
@@ -161,26 +145,120 @@ def _multpl_one(slug, tries=2):
     return pd.Series(dtype=float)
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
-def multpl_many(slugs):
-    return {s: _multpl_one(s) for s in slugs}
+def _db():
+    """DB connection, or None in stub mode / when SQLite is unavailable."""
+    if _STUB_MODE:
+        return None
+    import db_store
+    return db_store.open_db()
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def yf_fetch(tickers):
+def _load_group(source, sids, fetch_one, workers=6, label="series"):
+    """DB-backed group load: fresh series come from SQLite, stale ones are
+    fetched in parallel and upserted. A failed fetch falls back to whatever
+    the DB already holds (even if stale) instead of 'data unavailable'."""
+    import db_store
+    db = _db()
+    out, stale = {}, []
+    if db is not None:
+        for sid in sids:
+            k = db_store.key(source, sid)
+            if db_store.is_fresh(db, k, db_store.freq_of(source, sid)):
+                out[sid] = db_store.get_series(db, k)
+            else:
+                stale.append(sid)
+    else:
+        stale = list(sids)
+
+    if stale:
+        def one(sid):
+            time.sleep(0.3)
+            return sid, fetch_one(sid)
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            fetched = dict(ex.map(one, stale))
+        for sid, s in fetched.items():
+            k = db_store.key(source, sid)
+            if db is not None:
+                db_store.upsert_series(db, k, db_store.freq_of(source, sid), s)
+                if not len(s):  # fetch failed: serve stale DB rows if any
+                    s = db_store.get_series(db, k)
+            out[sid] = s
+    if db is not None:
+        db.close()
+    return out
+
+
+def _yf_download(tickers, period):
     try:
-        d = yf.download(" ".join(tickers), period="2y", progress=False, auto_adjust=True)
-        return d["Close"].ffill()
+        d = yf.download(" ".join(tickers), period=period, interval="1d",
+                        auto_adjust=True, progress=False, threads=True)
+        c = d["Close"]
+        if isinstance(c, pd.Series):
+            c = c.to_frame(tickers[0])
+        return c
     except Exception:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner="Fetching live market data…")
+def _load_yahoo():
+    """DB-backed Yahoo closes: 5y seed on first run, 1-month tail refreshes."""
+    import db_store
+    db = _db()
+    tickers = list(YF_TICKERS)
+    need_full, need_tail, series = [], [], {}
+    if db is None:
+        need_full = tickers
+    else:
+        for t in tickers:
+            k = db_store.key("YF", t)
+            if db_store.is_fresh(db, k, "daily"):
+                series[t] = db_store.get_series(db, k)
+            elif db_store.has_rows(db, k):
+                need_tail.append(t)
+            else:
+                need_full.append(t)
+
+    for tks, period in ((need_full, "5y"), (need_tail, "1mo")):
+        if not tks:
+            continue
+        frame = _yf_download(tks, period)
+        for t in tks:
+            s = pd.Series(dtype=float)
+            if len(frame) and t in frame.columns:
+                s = frame[t].dropna()
+            k = db_store.key("YF", t)
+            if db is not None:
+                db_store.upsert_series(db, k, "daily", s)
+                if not len(s):
+                    s = db_store.get_series(db, k)
+            series[t] = s
+    if db is not None:
+        db.close()
+    px = pd.DataFrame(series).sort_index().ffill()
+    return px
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
 def load_all():
-    """Single cached entry point — import stays side-effect free."""
-    F = fred_many(FRED_IDS)
-    M = multpl_many(MULTPL_SLUGS)
-    px = yf_fetch(YF_TICKERS)
+    """Single cached entry point — import stays side-effect free.
+
+    Fresh series are served from the local SQLite store; only series whose
+    release calendar says new data can exist hit the network (in parallel).
+    """
+    status = st.status("Loading market data…", expanded=False)
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_fred = ex.submit(_load_group, "FRED", FRED_IDS, _fred_one, 6, "economic")
+        f_mult = ex.submit(_load_group, "MULTPL", MULTPL_SLUGS, _multpl_one, 4,
+                           "valuation")
+        f_yf = ex.submit(_load_yahoo)
+        F = f_fred.result()
+        status.write("Economic series ready")
+        M = f_mult.result()
+        status.write("Valuation multiples ready")
+        px = f_yf.result()
+        status.write("Market prices ready")
+    status.update(label="Market data ready", state="complete", expanded=False)
     return F, M, px
 
 

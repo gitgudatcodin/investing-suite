@@ -1,0 +1,5 @@
+streamlit>=1.30
+pandas
+numpy
+yfinance
+libsql  # Turso client (optional: only needed for the shared cloud DB)
