@@ -195,8 +195,8 @@ st.subheader("Trades")
 avg_mo = res["trades"] / max(1, res["n_months"])
 cache_note = "served from cache" if st.session_state.get("ml2_cached") else "freshly trained"
 st.markdown(
-    f"Round-trip trades: **{res['trades']:,}** over {res['n_months']} months "
-    f"(avg {avg_mo:.0f}/mo). Cost model: {P['costBps']} bps applied to buys + sells on turnover. "
+    f"One-way trades: **{res['trades']:,}** over {res['n_months']} months "
+    f"(avg {avg_mo:.0f}/mo; buys + sells counted separately). Cost model: {P['costBps']} bps applied to buys + sells on turnover. "
     f"Walk-forward training took **{res['train_secs']:.1f} s** "
     f"({res['n_blocks']} yearly models, 250 GD iters, {P['trainWin']}-mo windows, "
     f"λ={P['lambda']}) — {cache_note}."
