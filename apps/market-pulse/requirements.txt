@@ -2,4 +2,4 @@ streamlit>=1.30
 pandas
 numpy
 yfinance
-libsql  # Turso client (optional: only needed for the shared cloud DB)
+libsql==0.1.11  # Turso client (pinned: only 0.1.11 has cp314 wheels; newer builds lack Python 3.14 wheels)

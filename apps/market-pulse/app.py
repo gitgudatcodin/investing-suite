@@ -13,7 +13,7 @@ import time
 import hashlib
 import urllib.request
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 
 import numpy as np
 import pandas as pd
@@ -196,10 +196,16 @@ def _db():
     return db_store.open_db()
 
 
-def _load_group(source, sids, fetch_one, workers=6, label="series"):
+def _load_group(source, sids, fetch_one, workers=6, label="series",
+                progress=None, deadline=None):
     """DB-backed group load: fresh series come from SQLite, stale ones are
     fetched in parallel and upserted. A failed fetch falls back to whatever
-    the DB already holds (even if stale) instead of 'data unavailable'."""
+    the DB already holds (even if stale) instead of 'data unavailable'.
+
+    progress(sid) is called as each series resolves (fresh or fetched) so
+    the UI can show where the load is. Series still unfetched when
+    time.time() passes deadline are skipped and served from the DB.
+    """
     import db_store
     db = _db()
     out, stale = {}, []
@@ -208,6 +214,8 @@ def _load_group(source, sids, fetch_one, workers=6, label="series"):
             k = db_store.key(source, sid)
             if db_store.is_fresh(db, k, db_store.freq_of(source, sid)):
                 out[sid] = db_store.get_series(db, k)
+                if progress is not None:
+                    progress(sid)
             else:
                 stale.append(sid)
     else:
@@ -215,8 +223,13 @@ def _load_group(source, sids, fetch_one, workers=6, label="series"):
 
     if stale:
         def one(sid):
+            if deadline is not None and time.time() > deadline:
+                return sid, pd.Series(dtype=float)  # too slow: serve DB rows
             time.sleep(0.3)
-            return sid, fetch_one(sid)
+            s = fetch_one(sid)
+            if progress is not None:
+                progress(sid)
+            return sid, s
 
         with ThreadPoolExecutor(max_workers=workers) as ex:
             fetched = dict(ex.map(one, stale))
@@ -244,8 +257,12 @@ def _yf_download(tickers, period):
         return pd.DataFrame()
 
 
-def _load_yahoo():
-    """DB-backed Yahoo closes: 5y seed on first run, 1-month tail refreshes."""
+def _load_yahoo(progress=None, deadline=None):
+    """DB-backed Yahoo closes: 5y seed on first run, 1-month tail refreshes.
+
+    progress(t) is called per resolved ticker; tickers still unfetched when
+    time.time() passes deadline are skipped and served from the DB.
+    """
     import db_store
     db = _db()
     tickers = list(YF_TICKERS)
@@ -257,6 +274,8 @@ def _load_yahoo():
             k = db_store.key("YF", t)
             if db_store.is_fresh(db, k, "daily"):
                 series[t] = db_store.get_series(db, k)
+                if progress is not None:
+                    progress(t)
             elif db_store.has_rows(db, k):
                 need_tail.append(t)
             else:
@@ -265,7 +284,10 @@ def _load_yahoo():
     for tks, period in ((need_full, "5y"), (need_tail, "1mo")):
         if not tks:
             continue
-        frame = _yf_download(tks, period)
+        if deadline is not None and time.time() > deadline:
+            frame = pd.DataFrame()
+        else:
+            frame = _yf_download(tks, period)
         for t in tks:
             s = pd.Series(dtype=float)
             if len(frame) and t in frame.columns:
@@ -276,6 +298,8 @@ def _load_yahoo():
                 if not len(s):
                     s = db_store.get_series(db, k)
             series[t] = s
+            if progress is not None:
+                progress(t)
     if db is not None:
         db.close()
     px = pd.DataFrame(series).sort_index().ffill()
@@ -290,16 +314,46 @@ def load_all():
     release calendar says new data can exist hit the network (in parallel).
     """
     status = st.status("Loading market data…", expanded=False)
+    # Per-group progress counters, bumped from worker threads (the label
+    # itself is only ever updated here, in the script thread).
+    counts = {"economic": [0, len(FRED_IDS)],
+              "valuation": [0, len(MULTPL_SLUGS)],
+              "prices": [0, len(YF_TICKERS)]}
+
+    def _prog(group):
+        def cb(_sid):
+            counts[group][0] += 1
+        return cb
+
+    def _label():
+        parts = [f"{g} {c[0]}/{c[1]}" for g, c in counts.items()]
+        return "Loading market data… (" + ", ".join(parts) + ")"
+
+    start = time.time()
     with ThreadPoolExecutor(max_workers=3) as ex:
-        f_fred = ex.submit(_load_group, "FRED", FRED_IDS, _fred_one, 6, "economic")
-        f_mult = ex.submit(_load_group, "MULTPL", MULTPL_SLUGS, _multpl_one, 4,
-                           "valuation")
-        f_yf = ex.submit(_load_yahoo)
-        F = f_fred.result()
+        futs = {
+            ex.submit(_load_group, "FRED", FRED_IDS, _fred_one, 6, "economic",
+                      _prog("economic"), start + 300): "FRED",
+            ex.submit(_load_group, "MULTPL", MULTPL_SLUGS, _multpl_one, 4,
+                      "valuation", _prog("valuation"), start + 120): "MULTPL",
+            ex.submit(_load_yahoo, _prog("prices"), start + 150): "YF",
+        }
+        pending = set(futs)
+        results = {}
+        # Poll so the status label shows live per-group progress instead of
+        # a spinner that looks stuck; each group also has a hard deadline
+        # after which it serves whatever the DB holds.
+        while pending:
+            done, pending = wait(pending, timeout=2)
+            for f in done:
+                try:
+                    results[futs[f]] = f.result()
+                except Exception:
+                    results[futs[f]] = {} if futs[f] != "YF" else pd.DataFrame()
+            status.update(label=_label())
+        F, M, px = results["FRED"], results["MULTPL"], results["YF"]
         status.write("Economic series ready")
-        M = f_mult.result()
         status.write("Valuation multiples ready")
-        px = f_yf.result()
         status.write("Market prices ready")
     status.update(label="Market data ready", state="complete", expanded=False)
     return F, M, px

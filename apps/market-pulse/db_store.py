@@ -175,7 +175,12 @@ def get_series(con, sid: str):
 
 
 def upsert_series(con, sid: str, freq: str, series, now: dt.datetime | None = None) -> int:
-    """Insert/replace rows; always refresh last_fetch. Returns rows written."""
+    """Insert/replace rows; always refresh last_fetch. Returns rows written.
+
+    Uses chunked multi-row INSERTs (one round trip per chunk) instead of
+    executemany: the libsql remote client issues roughly one HTTP request
+    per statement, so a 16k-row backfill via executemany would take forever.
+    """
     now = now or dt.datetime.now(dt.timezone.utc)
     n = 0
     try:
@@ -183,9 +188,17 @@ def upsert_series(con, sid: str, freq: str, series, now: dt.datetime | None = No
             s = series.dropna()
             rows = [(sid, d.strftime("%Y-%m-%d"), float(v))
                     for d, v in zip(s.index, s.values)]
-            con.executemany(
-                "INSERT OR REPLACE INTO series (sid, d, v) VALUES (?, ?, ?)", rows)
             n = len(rows)
+            # 3 params per row; 3000 rows = 9000 params, well under the
+            # SQLite variable limit, one round trip per chunk.
+            for i in range(0, len(rows), 3000):
+                chunk = rows[i:i + 3000]
+                placeholders = ",".join(["(?, ?, ?)"] * len(chunk))
+                params = [p for r in chunk for p in r]
+                con.execute(
+                    "INSERT OR REPLACE INTO series (sid, d, v)"
+                    f" VALUES {placeholders}",
+                    params)
         con.execute(
             "INSERT INTO meta (sid, freq, last_fetch) VALUES (?, ?, ?)"
             " ON CONFLICT(sid) DO UPDATE SET freq=excluded.freq,"
