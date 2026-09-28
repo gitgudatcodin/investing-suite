@@ -366,24 +366,24 @@ st.sidebar.subheader("Holdings")
 mode = st.sidebar.radio("Input mode", ["Shares", "Weights %"], horizontal=True,
                         help="Shares sizes positions by market value; Weights % uses the percentages directly.")
 hold_df = st.sidebar.data_editor(
-    st.session_state.hold_df, num_rows="dynamic", use_container_width=True,
+    st.session_state.hold_df, num_rows="dynamic", width="stretch",
     column_config={"Ticker": st.column_config.TextColumn("Ticker", max_chars=10),
                    "Amount": st.column_config.NumberColumn("Amount", min_value=0)},
     key=f"hold_editor_{st.session_state.ed_key}")
 c1, c2 = st.sidebar.columns(2)
 with c1:
-    if st.button("+ Sample", use_container_width=True):
+    if st.button("+ Sample", width="stretch"):
         reset_holdings(pd.DataFrame(
             {"Ticker": ["AAPL", "MSFT", "NVDA", "JNJ", "XOM", "JPM"],
              "Amount": [20, 15, 30, 25, 40, 20]}))
 with c2:
-    if st.button("Clear", use_container_width=True):
+    if st.button("Clear", width="stretch"):
         reset_holdings(pd.DataFrame({"Ticker": [], "Amount": []}))
 
 with st.sidebar.expander("Bulk import"):
     bulk = st.text_area("One per line: TICKER, amount", "AAPL, 20\nMSFT, 15",
                         height=90, label_visibility="collapsed")
-    if st.button("Import lines", use_container_width=True):
+    if st.button("Import lines", width="stretch"):
         rows = []
         for line in bulk.splitlines():
             p = [x.strip() for x in re.split(r"[,;\t]", line) if x.strip()]
@@ -406,7 +406,7 @@ sizing = st.sidebar.selectbox("Position sizing over history",
 sizing_mode = "drift" if sizing.startswith("Buy") else "fixed"
 st.sidebar.caption("Buy & hold lets winners grow their weight, like a real untouched portfolio.")
 
-analyze = st.sidebar.button("▶ Analyze portfolio", type="primary", use_container_width=True)
+analyze = st.sidebar.button("▶ Analyze portfolio", type="primary", width="stretch")
 
 # ---------------------------------------------------------------- analysis
 def run_analysis(df, years, bench, rf, sizing_mode, mode):
@@ -515,20 +515,20 @@ with tab_ov:
     with c[3]: kpi_card("Correlation", num2(M.get("corr")), f"vs {res['bench']}" if has_b else "no benchmark")
     st.plotly_chart(growth_chart(rdates, M["equity"][1:],
                                  res["bench_eq"], res["bench"] if has_b else ""),
-                    use_container_width=True)
+                    width="stretch")
     c1, c2 = st.columns(2)
     with c1:
-        st.plotly_chart(donut_chart(tickers, w), use_container_width=True)
+        st.plotly_chart(donut_chart(tickers, w), width="stretch")
     with c2:
-        st.plotly_chart(underwater_chart(rdates, M["equity"][1:]), use_container_width=True)
+        st.plotly_chart(underwater_chart(rdates, M["equity"][1:]), width="stretch")
 
 with tab_pf:
-    st.plotly_chart(heatmap_fig(res["monthly"]), use_container_width=True)
+    st.plotly_chart(heatmap_fig(res["monthly"]), width="stretch")
     c1, c2 = st.columns(2)
     with c1:
-        st.plotly_chart(hist_chart(pr), use_container_width=True)
+        st.plotly_chart(hist_chart(pr), width="stretch")
     with c2:
-        st.plotly_chart(rolling_vol_chart(rdates, pr), use_container_width=True)
+        st.plotly_chart(rolling_vol_chart(rdates, pr), width="stretch")
     pos_m = [r for _, r in res["monthly"] if r > 0]
     if has_b:
         bm_m = res["bench_monthly"]
@@ -577,14 +577,14 @@ with tab_rk:
             (f"{res['bench']} CAGR", pct(M["bench_cagr"])),
             (f"{res['bench']} vol", pct(M["bench_vol"])),
         ], columns=["Metric", "Value"])
-        st.dataframe(rel, use_container_width=True, hide_index=True)
+        st.dataframe(rel, width="stretch", hide_index=True)
         c1, c2 = st.columns(2)
         with c1:
-            st.plotly_chart(rolling_beta_chart(rdates, pr, br), use_container_width=True)
+            st.plotly_chart(rolling_beta_chart(rdates, pr, br), width="stretch")
         with c2:
-            st.plotly_chart(corr_fig(tickers, res["rets_hold"]), use_container_width=True)
+            st.plotly_chart(corr_fig(tickers, res["rets_hold"]), width="stretch")
     rc = [h["risk_contrib"] for h in H]
-    st.plotly_chart(risk_bar_fig(tickers, rc), use_container_width=True)
+    st.plotly_chart(risk_bar_fig(tickers, rc), width="stretch")
 
 with tab_hd:
     rows = {
@@ -609,7 +609,7 @@ with tab_hd:
         rows["Return contrib."].append("—")
         rows["Risk contrib."].append("—")
     dfh = pd.DataFrame(rows)
-    st.dataframe(dfh, use_container_width=True, hide_index=True)
+    st.dataframe(dfh, width="stretch", hide_index=True)
     st.caption("Return contrib. ≈ weight × holding CAGR. Risk contrib. = Euler share of portfolio volatility (sums to 100%).")
 
 with st.expander("Methodology & data notes"):
