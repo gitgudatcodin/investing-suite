@@ -146,11 +146,15 @@ def _fred_one(sid):
     if _STUB_MODE:
         return _stub_series(sid)
     # 0) FRED official API when a free key is configured — the reliable path.
+    #     Two attempts: a single transient blip should not poison the series
+    #     for a whole 6h cache window.
     key = _fred_api_key()
     if key:
-        s = _fred_api(sid, key)
-        if len(s):
-            return s
+        for _try in range(2):
+            s = _fred_api(sid, key)
+            if len(s):
+                return s
+            time.sleep(2)
     # 1) FRED direct CSV — single fast attempt so a blocked FRED fails over
     #    quickly instead of burning 2 x 25s timeouts per series.
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
@@ -166,7 +170,29 @@ def _fred_one(sid):
     except Exception:
         pass
     # 2) DBnomics FRED mirror (independent host, no key)
-    return _dbnomics_fred(sid)
+    s = _dbnomics_fred(sid)
+    if len(s):
+        return s
+    # 3) Wilshire 5000: Yahoo carries the same price index as ^W5000
+    #    (1989→today, includes 2020). Stored under the FRED key so the
+    #    Buffett card and the DB work unchanged whichever leg supplied it.
+    if sid == "WILL5000PR":
+        try:
+            df = yf.download("^W5000", period="max", interval="1d",
+                             auto_adjust=True, progress=False)
+            c = df["Close"]
+            if hasattr(c, "columns"):
+                c = c.iloc[:, 0]
+            c = c.dropna()
+            c.index = pd.to_datetime(c.index).tz_localize(None)
+            s = pd.Series(pd.to_numeric(c, errors="coerce").to_numpy(),
+                          index=c.index).dropna().sort_index()
+            s = s[~s.index.duplicated(keep="last")]
+            if len(s):
+                return s
+        except Exception:
+            pass
+    return pd.Series(dtype=float)
 
 
 def _multpl_one(slug, tries=2):
