@@ -47,7 +47,7 @@ st.markdown(
 
 # Engine lives in valuation_engine.py so headless/scheduled use shares
 # one implementation with the interactive app.
-from valuation_engine import HORIZON, fetch_company as _fetch_company_raw, project, implied_growth
+from valuation_engine import HORIZON, fetch_company as _fetch_company_raw, project, implied_growth, multiples_value
 
 fetch_company = st.cache_data(ttl=3600, show_spinner=False)(_fetch_company_raw)
 
@@ -106,6 +106,12 @@ if co.get("error"):
     st.error(co["error"])
     st.info("Tip: check the ticker symbol (e.g. AAPL, MSFT, NVDA). US listings work best.")
     st.stop()
+if co.get("degraded"):
+    if co.get("fund_source") == "edgar":
+        st.info("Yahoo was rate-limited — price from Nasdaq, fundamentals from SEC EDGAR filings. All anchors are live.")
+    else:
+        st.warning("Yahoo blocked the fundamentals fetch (rate limit) — price is from Nasdaq. "
+                   "Enter revenue, margins and share count manually below; the multiples tab works fine with manual inputs.")
 
 # company snapshot bar
 h = co.get("hist", {})
@@ -279,7 +285,7 @@ with sv2:
 proj = {"Bull": project(bull, base), "Base": project(base_sc, base), "Bear": project(bear, base)}
 years = [str(pd.Timestamp.now().year + int(y)) for y in proj["Base"]["Year"]]
 
-t1, t2, t3 = st.tabs(["📈 Projections", "⚖️ Verdict", "📚 Methodology"])
+t1, t2, t3, t4 = st.tabs(["📈 Projections", "⚖️ Verdict", "📚 Methodology", "🔢 Simple Multiples"])
 
 
 def _money(x) -> str:
@@ -479,7 +485,66 @@ with t3:
 **What this model deliberately does NOT do:** no terminal-value DCF with a perpetual growth guess (the terminal value usually drives 70%+ of a DCF and is the least knowable input — here the exit multiple carries that weight transparently); no quarterly precision theater; no Monte Carlo (three honest scenarios beat 10,000 draws from made-up distributions).
 
 **Cross-checks built in:** the reverse-DCF "priced-in growth" anchor, FCF/share alongside EPS (cash is harder to fake than earnings), and the sensitivity grid. If the model says "buy" but the sensitivity grid is mostly red, the model is telling you the answer depends on everything going right.
+
+**Methodology v2 — the daily screen engine (Oct 2026).** The automated daily screen runs this same engine headlessly under a hardened rule set, because hand-set judgment doesn't scale to a daily screen:
+- **Tiered discount rates.** No flat 10%: the base rate is 9% (stable compounder — beta ≤ 1.1, debt/equity ≤ 0.5, tight 5-yr margin range), 10% (standard), or 12% (speculative — beta ≥ 1.5, D/E ≥ 1.0, or wild margins). Bear = base + 2.5pp; bull = base − 1.5pp (floor 8%).
+- **The bear must hurt.** Bear revenue ≈ 0.1× the capped base growth minus 2pp, margins compress ≥30% *vs the base case*, the exit P/E derates ≥25% below the base range, and shares dilute 1%/yr.
+- **Peak-margin guard.** If year-5 EPS would be computed at the historical max margin, every scenario is valued at the conservative (low) end of its exit range — no multiple expansion on peak earnings.
+- **Divergence flag (report-only).** Where a hardened 10-yr DCF fair value exists for the same ticker, the report shows (screen FV − DCF FV) / DCF FV and flags |gap| > 30%. It changes no verdict — it surfaces contradictions.
+
+**Design note: this lab vs the research notes.** The research PDFs use 10-year FCF DCFs; this lab uses a 5-year EPS × exit-P/E scenario model *by design* — the earnings-power family, transparent about its multiples instead of burying the answer in a terminal growth rate. The two will disagree on individual names (a high-multiple grower can screen far above its hardened DCF); that disagreement is information, not a bug, and the divergence flag exists to surface it.
 """)
     st.caption("Methodology notes: Damodaran (investment valuation), Mauboussin — *Expectations Investing* "
                "(reverse DCF) and corporate longevity / base-rate research, Lynch (PEG). "
                "Free data via Yahoo Finance; no API keys.")
+
+with t4:
+    st.subheader(f"Simple multiples — {co['ticker']} @ ${co['price']:,.2f}")
+    st.caption("Fair value = forward EPS × target P/E. No projection machinery, no discounting — "
+               "the P/E scenarios carry all the growth and multiple judgment explicitly. "
+               "Use the Projections tab for the full 5-year scenario model.")
+
+    fwd_pe = co.get("forward_pe")
+    tr_pe = co.get("trailing_pe")
+    anchor_pe = fwd_pe or tr_pe
+    impl_eps = co["price"] / fwd_pe if fwd_pe else None
+
+    a1, a2, a3 = st.columns(3)
+    a1.metric("Trailing P/E", f"{tr_pe:.1f}×" if tr_pe else "n/a")
+    a2.metric("Forward P/E", f"{fwd_pe:.1f}×" if fwd_pe else "n/a")
+    a3.metric("Implied forward EPS", f"${impl_eps:,.2f}" if impl_eps else "n/a")
+
+    def_pe_base = round(anchor_pe, 1) if anchor_pe else 15.0
+    c1, c2, c3, c4 = st.columns(4)
+    fwd_eps = c1.number_input("Forward EPS ($)", value=float(f"{impl_eps:.2f}") if impl_eps else 0.0,
+                              key="m_fwd_eps")
+    pe_bear = c2.number_input("Bear P/E", value=round(def_pe_base * 0.8, 1), key="m_pe_bear")
+    pe_base = c3.number_input("Base P/E", value=def_pe_base, key="m_pe_base")
+    pe_bull = c4.number_input("Bull P/E", value=round(def_pe_base * 1.2, 1), key="m_pe_bull")
+
+    mv = multiples_value(fwd_eps, pe_bear, pe_base, pe_bull, co["price"])
+    sc = mv["scenarios"]
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Bear target", _px(sc["bear"]), f"{pe_bear:.1f}×")
+    m2.metric("Base target", _px(sc["base"]), f"{pe_base:.1f}×")
+    m3.metric("Bull target", _px(sc["bull"]), f"{pe_bull:.1f}×")
+    up = mv["upside"]
+    m4.metric("Weighted fair value (25/50/25)", _px(mv["fair_value"]),
+              f"{up:+.0%}" if up == up else "n/a")
+
+    fig_m = go.Figure()
+    fig_m.add_bar(x=["Bear", "Base", "Bull", "Weighted FV"],
+                  y=[sc["bear"], sc["base"], sc["bull"], mv["fair_value"]],
+                  marker_color=["#ef4444", "#3b82f6", "#22c55e", "#a78bfa"],
+                  name="Target")
+    fig_m.add_hline(y=co["price"], line_dash="dash", line_color="#f59e0b",
+                    annotation_text=f"Price ${co['price']:,.2f}")
+    fig_m.update_layout(title="Multiples-implied targets vs current price",
+                        yaxis_title="Price ($)", showlegend=False, height=380)
+    st.plotly_chart(fig_m, width="stretch")
+
+    st.caption("Limits, stated plainly: a P/E says what the market pays per dollar of earnings — "
+               "it says nothing about whether those earnings arrive. This tab has no growth model, "
+               "no margin path, and no discounting; it is a snapshot, not a forecast. "
+               "Sanity-check your P/Es against the stock's own history, peers, and PEG discipline "
+               "(P/E ÷ earnings growth % ≈ 1 is fair).")

@@ -119,6 +119,47 @@ average; for asset-light businesses it tracks net margin closely.)
 - Garbage in, gospel out — the sensitivity grid exists so you can see how
   much of the answer depends on everything going right.
 
+## 10. Methodology v2 — the hardened daily-screen variant (Oct 2026)
+
+The automated daily screen (`daily_picks.py`) runs this same engine
+headlessly under a hardened rule set — hand-set judgment doesn't scale to a
+daily screen, so the v2 review's findings were codified as rules:
+
+- **Tiered discount rates.** No flat 10%. The base rate is 9% (stable
+  compounder: beta ≤ 1.1, debt/equity ≤ 0.5, 5-yr net-margin range ≤ 10pp),
+  10% (standard), or 12% (speculative: beta ≥ 1.5, D/E ≥ 1.0, or 5-yr
+  margin range ≥ 20pp). Bear = base + 250bp; bull = base − 150bp (floor
+  8%). A missing input abstains — it neither proves stability nor
+  speculation.
+- **The bear must hurt.** Bear revenue ≈ 0.1× the (capped) base growth
+  minus 2pp (floored at −5%/yr), year-5 margin at 0.7× the *base-case*
+  margin (≥30% compression vs base, not vs its own start), FCF margin at
+  0.6×, exit P/E derated to 0.45–0.65× trailing (≥25% below the base exit
+  range), and +1%/yr share dilution.
+- **Peak-margin normalization guard.** If year-5 EPS would be computed at
+  the historical max net margin, a `peak_margin_flag` is set and every
+  scenario is valued at the conservative (low) end of its exit range — no
+  multiple expansion on peak earnings.
+- **Unchanged:** the 30% base-case growth cap and the 25/50/25 probability
+  weighting.
+- **Divergence flag (report-only).** Where a hardened 10-yr DCF fair value
+  exists for the same ticker (the 43-name Oct 2026 rebuild), the JSON and
+  report record `(screen_FV − v2_FV) / v2_FV` and flag |gap| > 30%. It
+  changes no flags or weights — it surfaces contradictions like APH
+  (screen $121 vs hardened DCF $55.53).
+
+## 11. Design note: this lab vs the research notes
+
+The research PDFs use 10-year FCF DCFs; this lab uses a 5-year EPS ×
+exit-P/E scenario model *by design*. It is the earnings-power family of
+valuation: transparent about its multiples instead of burying the answer in
+a terminal growth rate (which routinely drives 70%+ of a DCF and is the
+least knowable input). The two instruments will disagree on individual
+names — a high-multiple grower can screen far above its hardened DCF, and a
+deeply out-of-favor name can screen below it. That disagreement is
+information, not a bug: it tells you where the market's multiple
+assumption, not the cash-flow math, is doing the work.
+
 ## Sources
 
 - Damodaran, *Investment Valuation* — DCF and relative-valuation frameworks
